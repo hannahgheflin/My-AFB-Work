@@ -1,0 +1,359 @@
+#--drop temp tables just in case
+
+                drop table if exists temp_households_assisted;
+
+    drop table if exists temp_assistance;
+
+    drop table if exists temp_employment;
+
+    drop table if exists temp_ages;
+
+    drop table if exists temp_new_ind;
+
+    drop table if exists new_ind;
+
+ 
+
+                #--each distinct agency/household/assistance date group
+
+                create temporary table temp_households_assisted
+
+                select ag.agency_id as agency_id,
+
+    ag.agency_name as agency_name,
+
+                c.household_id as household_id,
+
+    c.case_id,
+
+    (a.assistance_date) as assistance_date
+
+                from assistance as a
+
+    inner join cases as c on a.case_id = c.case_id
+
+                left join agencies as ag on ag.agency_name = a.agency_name;
+
+   
+
+    #--unique cases for each agency per month
+
+    create temporary table temp_assistance
+
+                select
+
+                temp_households_assisted.agency_name,
+
+                temp_households_assisted.household_id,
+
+                cases.case_id,
+
+                cases.date_of_birth,
+
+    cases.employment_status,
+
+                month(temp_households_assisted.assistance_date) as assisted_month,
+
+    year(temp_households_assisted.assistance_date) as assisted_year
+
+                from temp_households_assisted
+
+                inner join cases
+
+                on temp_households_assisted.household_id = cases.household_id
+
+                where temp_households_assisted.assistance_date BETWEEN DATE_FORMAT(NOW() - INTERVAL 1 MONTH, '%Y-%m-01 00:00:00') and now()
+
+                group by temp_households_assisted.agency_name, temp_households_assisted.household_id, cases.case_id;
+
+   
+
+    #--counts the amount of full-time and part-time cases served at each agency
+
+    create temporary table temp_employment
+
+    select
+
+                ta.agency_name,
+
+                count(ta.employment_status) as employed
+
+                from temp_assistance as ta
+
+                where ta.employment_status = "Full Time" or ta.employment_status = "Part Time"
+
+                group by ta.agency_name;
+
+   
+
+    #--age categories from temp_assistance table above per agency per month
+
+    create temporary table temp_ages
+
+    select
+
+                temp_assistance.agency_name,
+
+    temp_assistance.assisted_month,
+
+    temp_assistance.assisted_year,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), temp_assistance.date_of_birth)), '%Y') + 0 between 0 and 17 then 1 else NULL end) as ages_0_17,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), temp_assistance.date_of_birth)), '%Y') + 0 between 18 and 59 then 1 else NULL end) as ages_18_59,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), temp_assistance.date_of_birth)), '%Y') + 0 >= 60 then 1 else NULL end) as ages_60_plus,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), temp_assistance.date_of_birth)), '%Y') + 0 is NULL then 1 else NULL end) as ages_unknown,
+
+    count(distinct(temp_assistance.case_id)) as tot_ind
+
+                from temp_assistance
+
+                group by agency_name;
+
+   
+
+    #--groups distinct agency/household/case with their min assistance date together
+
+    #--(gives household members same assistance date + agency as the household member with the assistance record)
+
+    create temporary table temp_new_ind
+
+                select
+
+                temp_households_assisted.Agency_ID,
+
+                temp_households_assisted.Agency_Name,
+
+                temp_households_assisted.Household_ID,
+
+                min(temp_households_assisted.assistance_date) as min_assist,
+
+                cases.case_id as new_case
+
+                from temp_households_assisted
+
+                inner join cases
+
+                on temp_households_assisted.household_id = cases.household_id
+
+                group by temp_households_assisted.Agency_Name, temp_households_assisted.Household_ID, cases.case_id;
+
+   
+
+    #--number of ind from temp_new_ind that had their first assistance date (specific to every agency) last month
+
+    create temporary table new_ind
+
+                select temp_new_ind.agency_name,
+
+    count(temp_new_ind.new_case) as new_individuals,
+
+    count(distinct temp_new_ind.household_id) as new_households
+
+                from temp_new_ind
+
+                where temp_new_ind.min_assist BETWEEN DATE_FORMAT(NOW() - INTERVAL 1 MONTH, '%Y-%m-01 00:00:00') and now()
+
+                group by agency_name;
+
+ 
+
+                #change "historical_agency_report_2023" to appropriate historical table for the month being calculated.
+
+                #########################################
+
+    #INSERT INTO historical_agency_report_2023
+
+                #########################################
+
+                select
+
+                agencies.agency_id, assistance.agency_name, temp_ages.assisted_month, temp_ages.assisted_year,
+
+                temp_ages.ages_0_17 as ages_0_17,
+
+                temp_ages.ages_18_59 as ages_18_59,
+
+                temp_ages.ages_60_plus as ages_60_plus,
+
+                temp_ages.ages_unknown as ages_unknown,
+
+                temp_ages.tot_ind as total_individuals,
+
+    case when new_ind.new_individuals is null then 0 else new_ind.new_individuals end as new_individuals,
+
+    case when new_ind.new_individuals is null then temp_ages.tot_ind else temp_ages.tot_ind - new_ind.new_individuals end as returning_individuals,
+
+                count(distinct cases.household_id) as total_households,
+
+    case when new_ind.new_households is null then 0 else new_ind.new_households end as new_households,
+
+    case when new_ind.new_households is null then count(distinct cases.household_id) else count(distinct cases.household_id) - new_ind.new_households end as returning_households,
+
+    case when temp_employment.employed is null then 0 else temp_employment.employed end as employed
+
+                from assistance
+
+                left join cases on assistance.case_id = cases.case_id
+
+                left join agencies on assistance.agency_name = agencies.agency_name
+
+    left join temp_ages on agencies.agency_name = temp_ages.agency_name
+
+    left join new_ind on agencies.agency_name = new_ind.agency_name
+
+    left join temp_employment on agencies.agency_name = temp_employment.agency_name
+
+                where assistance.assistance_date BETWEEN DATE_FORMAT(NOW() - INTERVAL 1 MONTH, '%Y-%m-01 00:00:00') and now()
+
+                group by agency_name order by agency_name;
+
+   
+
+    #--drop tables just in case.
+
+    drop table if exists temp_households_assisted;
+
+    drop table if exists temp_assistance;
+
+    drop table if exists temp_employment;
+
+    drop table if exists temp_ages;
+
+    drop table if exists temp_new_ind;
+
+    drop table if exists new_ind;
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+drop table if exists temp_households_assisted;
+
+                drop table if exists temp_household_info;
+
+ 
+
+                #--each distinct agency/household/assistance date group
+
+                create temporary table temp_households_assisted
+
+                select ag.agency_id, ag.agency_name,
+
+                c.household_id, c.case_id, a.assistance_date, c.street_address, a.city, a.zip, a.county,
+
+                a.housing_status, a.no_fixed_address, a.snap_household, a.disabled_household, a.six_months_disabled,
+
+                month(a.assistance_date) as assisted_month,
+
+                year(a.assistance_date) as assisted_year
+
+                from assistance as a
+
+                inner join cases as c on a.case_id = c.case_id
+
+                left join agencies as ag on ag.agency_name = a.agency_name;
+
+ 
+
+                #--age categories and household income for each household id
+
+                create temporary table temp_household_info
+
+                select cases.household_id,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), cases.date_of_birth)), '%Y') + 0 between 0 and 17 then 1 else NULL end) as ages_0_to_17,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), cases.date_of_birth)), '%Y') + 0 between 18 and 59 then 1 else NULL end) as ages_18_to_59,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), cases.date_of_birth)), '%Y') + 0 >= 60 then 1 else NULL end) as ages_60_plus,
+
+                count(case when date_format(from_days(datediff(DATE_FORMAT(NOW(), '%Y-%m-01 00:00:00'), cases.date_of_birth)), '%Y') + 0 is NULL then 1 else NULL end) as ages_unknown,
+
+                count(distinct cases.case_id) as tot_ind,
+
+    sum(cases.income_amount) as household_income
+
+                from cases
+
+                group by household_id order by household_id;
+
+   
+
+                ###########################################
+
+                #INSERT INTO historical_data_2023
+
+    ###########################################
+
+                select
+
+                tha.agency_id,
+
+                tha.agency_name,
+
+                tha.assisted_month,
+
+                tha.assisted_year,
+
+                tha.assistance_date,
+
+                tha.household_id,
+
+                cases.case_id,
+
+                cases.income_amount,
+
+                cases.income_source,
+
+    info.household_income,
+
+                cases.employment_status,
+
+                case when info.ages_0_to_17 != 0 and ages_18_to_59 != 0 and ages_60_plus != 0 then 'YES' else 'NO' end as multi_gen_household,
+
+                case when (info.ages_18_to_59 = 1 xor info.ages_60_plus = 1) and ages_0_to_17 != 0 then 'YES' else 'NO' end as single_parent,
+
+                case when info.tot_ind = 1 then 'YES' else 'NO' end as adult_living_alone,
+
+                tha.housing_status,
+
+                tha.no_fixed_address,
+
+                tha.snap_household,
+
+                tha.disabled_household,
+
+                tha.six_months_disabled,
+
+    tha.street_address,
+
+    tha.city,
+
+    tha.zip,
+
+    tha.county
+
+                from temp_households_assisted as tha
+
+                inner join cases on tha.household_id = cases.household_id
+
+                left join temp_household_info as info on cases.household_id = info.household_id
+
+                where tha.assistance_date BETWEEN DATE_FORMAT(NOW() - INTERVAL 1 MONTH, '%Y-%m-01 00:00:00') and now()
+
+                group by tha.agency_id, tha.agency_name, tha.household_id, cases.case_id, tha.assisted_month, tha.assisted_year;
+
+ 
+
+                drop table if exists temp_households_assisted;
+
+                drop table if exists temp_household_info;
